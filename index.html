@@ -93,8 +93,25 @@ header .sub { font-size: 12px; color: var(--text3); font-family: var(--font-mono
   border: 0.5px solid var(--border);
   border-radius: var(--radius);
   padding: 16px; overflow: hidden;
+  position: relative;
 }
-svg.graph { width: 100%; display: block; }
+svg.graph { width: 100%; display: block; cursor: grab; user-select: none; }
+svg.graph.dragging { cursor: grabbing; }
+
+.zoom-controls {
+  position: absolute; bottom: 24px; right: 24px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.zoom-btn {
+  width: 28px; height: 28px;
+  background: var(--bg3); border: 0.5px solid var(--border2);
+  border-radius: 6px; color: var(--text2);
+  font-size: 16px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: color .15s, border-color .15s;
+  font-family: var(--font-sans);
+}
+.zoom-btn:hover { color: var(--text); border-color: rgba(255,255,255,0.3); }
 
 .node-detail {
   background: var(--bg3);
@@ -201,6 +218,7 @@ svg.graph { width: 100%; display: block; }
             <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </marker>
         </defs>
+        <g id="zoom-layer">
 
         <line x1="320" y1="58" x2="178" y2="148" stroke="#444" stroke-width="0.8" marker-end="url(#arr)" fill="none"/>
         <line x1="320" y1="58" x2="320" y2="148" stroke="#444" stroke-width="0.8" marker-end="url(#arr)" fill="none"/>
@@ -303,7 +321,13 @@ svg.graph { width: 100%; display: block; }
           <text x="178" y="391" text-anchor="middle" font-size="9" font-weight="500" fill="#F5C4B3" font-family="'IBM Plex Sans',sans-serif">SG note</text>
           <text x="178" y="401" text-anchor="middle" font-size="8" fill="#993C1D" font-family="'IBM Plex Sans',sans-serif">8-Nov</text>
         </g>
+        </g>
         </svg>
+        <div class="zoom-controls">
+          <button class="zoom-btn" onclick="zoomBy(1.25)" title="Zoom in">+</button>
+          <button class="zoom-btn" onclick="zoomBy(0.8)" title="Zoom out">−</button>
+          <button class="zoom-btn" onclick="zoomReset()" title="Reset" style="font-size:11px">⌂</button>
+        </div>
       </div>
 
       <div id="node-detail" class="node-detail">
@@ -335,6 +359,100 @@ const answers = {
   3: `<strong>Traversal:</strong> <code>Person → involved_in → Incident (all)</code>, ordered by connection degree.<br><br>John appears in 4 of 6 active ep03 incidents as actor or recipient. That doesn't mean he is the problem — it may mean he is the bottleneck in the information flow between Boxel and the vendor. <span class="highlight">The useful question is not "who fails?" but "where does friction accumulate?"</span><br><br>This view needs careful framing before sharing with production.`,
   4: `<strong>Traversal:</strong> <code>Incident(type: retake_color_timing) → occurred_in → [EP01, EP02, EP03]</code><br><br>If the graph holds history from previous episodes: EP01 had 2 color timing retakes in week 4. EP02 had 4 of the same type concentrated in week 5. We are in week 4 of EP03 with 3 active retakes. <span class="highlight">The pattern suggests the problem is not the team — it's the lookdev confirmation process with the client.</span><br><br>That's institutional memory that normally evaporates between episodes.`
 };
+
+// Zoom & pan
+const svgEl = document.querySelector('svg.graph');
+const zoomLayer = document.getElementById('zoom-layer');
+let vx = 0, vy = 0, vscale = 1;
+const VW = 640, VH = 480;
+
+function applyTransform() {
+  zoomLayer.setAttribute('transform', `translate(${vx},${vy}) scale(${vscale})`);
+}
+
+function zoomBy(factor, cx, cy) {
+  if (cx === undefined) { cx = VW / 2; cy = VH / 2; }
+  const newScale = Math.min(4, Math.max(0.4, vscale * factor));
+  const ratio = newScale / vscale;
+  vx = cx - ratio * (cx - vx);
+  vy = cy - ratio * (cy - vy);
+  vscale = newScale;
+  applyTransform();
+}
+
+function zoomReset() {
+  vx = 0; vy = 0; vscale = 1;
+  applyTransform();
+}
+
+// Mouse wheel zoom
+svgEl.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = svgEl.getBoundingClientRect();
+  const scaleX = VW / rect.width;
+  const cx = (e.clientX - rect.left) * scaleX;
+  const cy = (e.clientY - rect.top) * scaleX;
+  zoomBy(e.deltaY < 0 ? 1.12 : 0.89, cx, cy);
+}, { passive: false });
+
+// Drag pan
+let drag = null;
+svgEl.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  drag = { startX: e.clientX, startY: e.clientY, startVx: vx, startVy: vy };
+  svgEl.classList.add('dragging');
+});
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const rect = svgEl.getBoundingClientRect();
+  const scaleX = VW / rect.width;
+  vx = drag.startVx + (e.clientX - drag.startX) * scaleX;
+  vy = drag.startVy + (e.clientY - drag.startY) * scaleX;
+  applyTransform();
+});
+window.addEventListener('mouseup', () => {
+  drag = null;
+  svgEl.classList.remove('dragging');
+});
+
+// Touch pinch + pan
+let touches = {};
+let lastDist = null;
+svgEl.addEventListener('touchstart', e => {
+  [...e.changedTouches].forEach(t => touches[t.identifier] = { x: t.clientX, y: t.clientY });
+}, { passive: true });
+svgEl.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const ids = Object.keys(touches);
+  if (e.touches.length === 1) {
+    const t = e.touches[0];
+    const prev = touches[t.identifier];
+    if (prev) {
+      const rect = svgEl.getBoundingClientRect();
+      const s = VW / rect.width;
+      vx += (t.clientX - prev.x) * s;
+      vy += (t.clientY - prev.y) * s;
+      applyTransform();
+    }
+    touches[t.identifier] = { x: t.clientX, y: t.clientY };
+  } else if (e.touches.length === 2) {
+    const a = e.touches[0], b = e.touches[1];
+    const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (lastDist !== null) {
+      const rect = svgEl.getBoundingClientRect();
+      const s = VW / rect.width;
+      const cx = ((a.clientX + b.clientX) / 2 - rect.left) * s;
+      const cy = ((a.clientY + b.clientY) / 2 - rect.top) * s;
+      zoomBy(dist / lastDist, cx, cy);
+    }
+    lastDist = dist;
+    [a, b].forEach(t => touches[t.identifier] = { x: t.clientX, y: t.clientY });
+  }
+}, { passive: false });
+svgEl.addEventListener('touchend', e => {
+  [...e.changedTouches].forEach(t => delete touches[t.identifier]);
+  if (e.touches.length < 2) lastDist = null;
+}, { passive: true });
 
 let activeQ = null;
 
